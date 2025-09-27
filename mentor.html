@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mentor Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+    <div class="max-w-7xl mx-auto p-6 space-y-6">
+        <header class="flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="h-10 w-10 rounded-xl bg-emerald-500/20 grid place-items-center">🧑‍🏫</div>
+                <div>
+                    <h1 id="mentorName" class="text-2xl md:text-3xl font-bold leading-tight">Mentor</h1>
+                    <p id="deptLabel" class="text-slate-400 text-sm">Department</p>
+                </div>
+            </div>
+
+            <div class="flex items-center gap-3">
+                <a class="text-sky-300 hover:underline" href="/">← Student Dashboard</a>
+                <!-- Download all -->
+                <button id="downloadAll"
+                    class="bg-sky-600 hover:bg-sky-500 text-white text-sm px-4 py-2 rounded-xl">Download All Reports
+                    (ZIP)</button>
+            </div>
+        </header>
+
+        <section class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <!-- Summary -->
+            <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-4">
+                <h2 class="font-semibold">Summary</h2>
+                <div class="text-sm text-slate-400" id="summaryMeta">Loading…</div>
+                <div class="mt-4 grid grid-cols-3 gap-3 text-center">
+                    <div>
+                        <div class="text-xs text-slate-400">Students</div>
+                        <div id="count" class="text-2xl font-bold">—</div>
+                    </div>
+                    <div>
+                        <div class="text-xs text-slate-400">Avg Actual</div>
+                        <div id="avgActual" class="text-2xl font-bold">—</div>
+                    </div>
+                    <div>
+                        <div class="text-xs text-slate-400">Avg Predicted</div>
+                        <div id="avgPred" class="text-2xl font-bold">—</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Distribution -->
+            <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 lg:col-span-2">
+                <h2 class="font-semibold mb-2">Score Distribution</h2>
+                <canvas id="hist"></canvas>
+            </div>
+
+            <!-- Roster -->
+            <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 lg:col-span-2">
+                <h2 class="font-semibold mb-2">Roster</h2>
+                <div class="overflow-auto">
+                    <table class="w-full text-sm">
+                        <thead class="text-slate-400">
+                            <tr>
+                                <th class="text-left py-2">Student</th>
+                                <th class="text-left py-2">ID</th>
+                                <th class="text-right py-2">Actual</th>
+                                <th class="py-2"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="roster"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- At risk -->
+            <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-4">
+                <h2 class="font-semibold mb-2">At Risk (Predicted &lt; 60)</h2>
+                <ul id="atRisk" class="space-y-2 text-sm"></ul>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        // Auth
+        const token = localStorage.getItem('token');
+        if (!token) window.location = '/login';
+
+        async function fetchJSON(url) {
+            const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+            if (r.status === 401) { localStorage.removeItem('token'); window.location = '/login'; return; }
+            return r.json();
+        }
+
+        async function downloadFile(url, filename) {
+            try {
+                const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+                if (!r.ok) { throw new Error(`Server error: ${r.status}`); }
+                const blob = await r.blob();
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(blob);
+                link.download = filename;
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                URL.revokeObjectURL(link.href);
+            } catch (err) {
+                alert('Unable to download: ' + err.message);
+            }
+        }
+
+        // Mentor id from path
+        function getMentorIdFromPath() { return window.location.pathname.split('/').filter(Boolean)[1]; }
+        const mentorId = getMentorIdFromPath();
+
+        document.getElementById('downloadAll').onclick = () =>
+            downloadFile(`/mentor/${mentorId}/reports.zip`, `${mentorId}_reports.zip`);
+
+        // Header
+        fetchJSON('/api/mentors').then(ms => {
+            const m = (ms || []).find(x => x.mentor_id === mentorId);
+            if (m) {
+                document.getElementById('mentorName').textContent = m.mentor_name;
+                document.getElementById('deptLabel').textContent = "Department: " + m.department;
+            }
+        });
+
+        // Summary + Histogram
+        fetchJSON(`/api/mentor/${mentorId}/summary`).then(d => {
+            if (!d) return;
+            document.getElementById('count').textContent = d.count;
+            document.getElementById('avgActual').textContent = d.avg_actual;
+            document.getElementById('avgPred').textContent = d.avg_predicted;
+            document.getElementById('summaryMeta').textContent = `${d.mentor.mentor_name} • ${d.mentor.department}`;
+
+            new Chart(document.getElementById('hist'), {
+                type: 'bar',
+                data: {
+                    labels: d.histogram.bins, datasets: [
+                        { label: 'Actual', data: d.histogram.actual },
+                        { label: 'Predicted', data: d.histogram.predicted }
+                    ]
+                },
+                options: { responsive: true, scales: { y: { beginAtZero: true } } }
+            });
+
+            const riskEl = document.getElementById('atRisk');
+            riskEl.innerHTML = d.at_risk.map(s =>
+                `<li class="flex items-center justify-between">
+          <span>${s.First_Name} ${s.Last_Name}</span>
+          <span class="text-slate-400">${Number(s.Predicted_Final_Score).toFixed(2)}</span>
+        </li>`).join('');
+        });
+
+        // Roster
+        fetchJSON(`/api/mentor/${mentorId}/students`).then(d => {
+            if (!d) return;
+            const tbody = document.getElementById('roster');
+            tbody.innerHTML = d.students.map(s =>
+                `<tr class="border-t border-slate-800 hover:bg-slate-800/50" data-id="${s.Student_ID}">
+          <td class="py-2">${s.First_Name} ${s.Last_Name}</td>
+          <td class="py-2">${s.Student_ID}</td>
+          <td class="py-2 text-right">${Number(s.Final_Score).toFixed(2)}</td>
+          <td class="py-2 text-right">
+            <button class="text-sky-300 hover:text-sky-200 text-xs download-btn" data-sid="${s.Student_ID}">
+              Download PDF
+            </button>
+          </td>
+        </tr>`).join('');
+
+            tbody.addEventListener('click', (e) => {
+                const dl = e.target.closest('.download-btn');
+                if (dl) {
+                    e.stopPropagation();
+                    const sid = dl.dataset.sid;
+                    downloadFile(`/mentor/${mentorId}/report/${sid}.pdf`, `${sid}_report.pdf`);
+                    return;
+                }
+                const tr = e.target.closest('tr[data-id]');
+                if (tr) openPanel(tr.dataset.id);
+            });
+        });
+
+        // ---------- Detail panel ----------
+        let panelChart;
+        function closePanel() { document.getElementById('detailPanel').classList.add('hidden'); }
+        async function openPanel(studentId) {
+            const d = await fetchJSON(`/api/student_data/${studentId}`);
+            if (!d || d.error) return alert(d?.error || 'Unable to load student');
+
+            document.getElementById('pDownload').onclick = () =>
+                downloadFile(`/mentor/${mentorId}/report/${d.student_id}.pdf`, `${d.student_id}_report.pdf`);
+
+            // Header
+            document.getElementById('pName').textContent = `${d.full_name} — Predicted ${d.predicted_final_score}`;
+            document.getElementById('pMeta').textContent = `${d.student_id} • ${d.department}`;
+            document.getElementById('pContext').textContent = `vs ${d.department} average`;
+
+            // Radar
+            const ctx = document.getElementById('pRadar');
+            const g = ctx.getContext('2d').createLinearGradient(0, 0, 0, 300);
+            g.addColorStop(0, 'rgba(56, 189, 248, 0.35)');
+            g.addColorStop(1, 'rgba(56, 189, 248, 0.10)');
+
+            const labels = ['Midterm', 'Assignments', 'Quizzes', 'Projects', 'Participation'];
+            const sVals = [d.graph_data.midterm, d.graph_data.assignments, d.graph_data.quizzes, d.graph_data.projects, d.graph_data.participation];
+            const aVals = [d.dept_avg.midterm, d.dept_avg.assignments, d.dept_avg.quizzes, d.dept_avg.projects, d.dept_avg.participation];
+
+            if (panelChart) panelChart.destroy();
+            panelChart = new Chart(ctx, {
+                type: 'radar',
+                data: {
+                    labels,
+                    datasets: [
+                        { label: 'Student', data: sVals, borderWidth: 2, borderColor: 'rgba(56,189,248,0.9)', backgroundColor: g, pointRadius: 3, pointBackgroundColor: 'rgba(56,189,248,1)' },
+                        { label: 'Dept Avg', data: aVals, borderWidth: 2, borderColor: 'rgba(148,163,184,0.9)', backgroundColor: 'rgba(148,163,184,0.10)', pointRadius: 0, borderDash: [6, 4] }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    plugins: { legend: { labels: { color: '#cbd5e1' } } },
+                    scales: {
+                        r: {
+                            grid: { color: 'rgba(148,163,184,0.2)' },
+                            angleLines: { color: 'rgba(148,163,184,0.2)' },
+                            pointLabels: { color: '#94a3b8' },
+                            suggestedMin: 0, suggestedMax: 100,
+                            ticks: { showLabelBackdrop: false, color: '#94a3b8', stepSize: 10 }
+                        }
+                    }
+                }
+            });
+
+            // Improvements
+            const pairs = Object.entries(d.deltas).sort((a, b) => a[1] - b[1]);
+            document.getElementById('pImprove').innerHTML = pairs.map(([key, delta]) => {
+                const pretty = key.charAt(0).toUpperCase() + key.slice(1);
+                const good = delta >= 0;
+                const tone = good ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' : 'text-rose-400 bg-rose-500/10 border-rose-500/20';
+                const msg = d.suggestions.find(s => s.toLowerCase().startsWith(pretty.toLowerCase()));
+                return `
+          <div class="border ${tone} rounded-xl p-3">
+            <div class="flex items-center justify-between">
+              <span class="font-medium">${pretty}</span>
+              <span class="${good ? 'text-emerald-400' : 'text-rose-400'} text-sm">${delta > 0 ? '+' : ''}${delta}</span>
+            </div>
+            <p class="text-slate-300 text-sm mt-1">${msg}</p>
+          </div>`;
+            }).join('');
+
+            document.getElementById('detailPanel').classList.remove('hidden');
+        }
+    </script>
+
+    <!-- ========== Student Detail Panel ========== -->
+    <div id="detailPanel" class="fixed inset-0 hidden">
+        <div class="absolute inset-0 bg-black/50" onclick="closePanel()"></div>
+        <div
+            class="absolute right-0 top-0 h-full w-full max-w-xl bg-slate-900 border-l border-slate-800 p-5 overflow-y-auto">
+            <div class="flex items-center justify-between mb-3">
+                <h3 id="pName" class="text-xl font-semibold">Student</h3>
+                <div class="flex items-center gap-2">
+                    <button id="pDownload" class="px-3 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white">Download
+                        PDF</button>
+                    <button class="px-3 py-1 rounded-lg bg-slate-800 border border-slate-700"
+                        onclick="closePanel()">Close</button>
+                </div>
+            </div>
+            <div class="text-slate-400 text-sm mb-4" id="pMeta"></div>
+            <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-4">
+                <canvas id="pRadar"></canvas>
+            </div>
+            <div class="mt-4 bg-slate-900/60 border border-slate-800 rounded-2xl p-4">
+                <div class="flex items-center justify-between">
+                    <h4 class="font-semibold">Areas for Improvement</h4>
+                    <span id="pContext" class="text-xs text-slate-400"></span>
+                </div>
+                <div id="pImprove" class="mt-3 grid gap-3"></div>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>

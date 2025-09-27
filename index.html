@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Performance Predictor — Student Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+    <div class="max-w-7xl mx-auto p-6 space-y-6">
+        <!-- Header -->
+        <header class="flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="h-10 w-10 rounded-xl bg-sky-500/20 grid place-items-center">📈</div>
+                <div>
+                    <h1 class="text-2xl md:text-3xl font-bold leading-tight">AI Performance Predictor</h1>
+                    <p class="text-slate-400 text-sm">Analyze student metrics & forecast outcomes.</p>
+                </div>
+            </div>
+            <div class="flex items-center gap-3">
+                <a href="/login" class="text-slate-300 underline hidden md:inline">Switch account</a>
+                <button id="logoutBtn"
+                    class="bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3 py-2 rounded-xl">Log
+                    out</button>
+            </div>
+        </header>
+
+        <section class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+            <!-- Left column -->
+            <aside class="lg:col-span-1 space-y-6">
+                <!-- Student picker -->
+                <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-4">
+                    <h2 class="font-semibold mb-2">Select Student</h2>
+                    <input id="search"
+                        class="w-full rounded-xl bg-slate-800 border border-slate-700 px-3 py-2 mb-3 focus:outline-none focus:ring-2 focus:ring-sky-600"
+                        placeholder="Search by name or ID" />
+                    <ul id="studentList" class="max-h-[430px] overflow-auto divide-y divide-slate-800 text-sm"></ul>
+                    <p id="studentHint" class="text-xs text-slate-500 mt-2"></p>
+                </div>
+
+                <!-- Model R2 -->
+                <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-4">
+                    <h2 class="font-semibold mb-2">Model Confidence</h2>
+                    <div class="flex items-end gap-2">
+                        <p id="r2" class="text-3xl font-extrabold">—</p>
+                        <span class="text-slate-400 mb-1 text-sm">R²</span>
+                    </div>
+                    <p class="text-xs text-slate-500 mt-1">Higher is better • calculated on a test split.</p>
+                </div>
+
+                <!-- Admin-only At-Risk card -->
+                <div id="atRiskBox" class="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 hidden">
+                    <div class="flex items-center justify-between">
+                        <h2 class="font-semibold">At-Risk Students</h2>
+                        <span id="atRiskMeta" class="text-xs text-slate-400"></span>
+                    </div>
+                    <ul id="atRiskList" class="mt-2 space-y-2 text-sm"></ul>
+                </div>
+
+
+                <!-- Mentors (admins see all links; mentors/students: hidden) -->
+                <div id="mentorBox" class="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 hidden">
+                    <h2 class="font-semibold mb-2">Mentor Dashboards</h2>
+                    <ul id="mentorLinks" class="space-y-2 text-sky-300 text-sm"></ul>
+                </div>
+            </aside>
+
+            <!-- Main column -->
+            <main class="lg:col-span-3">
+                <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6">
+                    <div class="flex items-center justify-between flex-wrap gap-4">
+                        <div>
+                            <h3 id="studentName" class="text-2xl font-semibold">Select a student</h3>
+                            <p id="studentMeta" class="text-slate-400 text-sm"></p>
+                        </div>
+                        <div class="text-right">
+                            <div class="text-slate-400 text-xs uppercase tracking-wide">Predicted Final Score</div>
+                            <div id="predScore" class="text-4xl font-extrabold">—</div>
+                            <div class="text-slate-500 text-xs">Actual: <span id="actualScore">—</span></div>
+                        </div>
+                    </div>
+
+                    <div class="mt-6">
+                        <canvas id="radar"></canvas>
+                        <div id="improveCard" class="mt-6 bg-slate-900/60 border border-slate-800 rounded-2xl p-4">
+                            <div class="flex items-center justify-between">
+                                <h4 class="font-semibold">Areas for Improvement</h4>
+                                <div class="mt-3">
+                                    <button id="downloadReport" class="bg-sky-600 hover:bg-sky-500 text-white px-4 py-2 rounded-xl">
+                                        Download My Report (PDF)
+                                    </button>
+                                </div>
+                                <span id="contextDept" class="text-xs text-slate-400"></span>
+                            </div>
+                            <div class="mt-3 grid md:grid-cols-2 gap-3" id="improveList"></div>
+                        </div>
+                    </div>
+                </div>
+            </main>
+        </section>
+    </div>
+
+<script>
+    // ===================== Auth guard =====================
+    const token = localStorage.getItem('token');
+    if (!token) window.location = '/login';
+
+    document.getElementById('logoutBtn').onclick = () => {
+        localStorage.removeItem('token');
+        window.location = '/login';
+    };
+
+    // ===================== Helpers =====================
+    function getClaimsFromToken(t) {
+        try {
+            return JSON.parse(atob(t.split('.')[1]));
+        } catch {
+            return {};
+        }
+    }
+    function getRoleFromToken(t) {
+        return getClaimsFromToken(t).role || null;
+    }
+    const claims = getClaimsFromToken(token);
+    const role = claims.role || null;
+
+    async function fetchJSON(url) {
+        const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+        if (r.status === 401) { localStorage.removeItem('token'); window.location = '/login'; return; }
+        return r.json();
+    }
+
+    // ===================== DOM refs =====================
+    const listEl = document.getElementById('studentList');
+    const searchEl = document.getElementById('search');
+    const r2El = document.getElementById('r2');
+    const mentorLinks = document.getElementById('mentorLinks');
+    const mentorBox = document.getElementById('mentorBox');
+    const studentHint = document.getElementById('studentHint');
+
+    // Admin-only at-risk card (make sure these elements exist in your HTML)
+    const atRiskBox = document.getElementById('atRiskBox');   // <div id="atRiskBox" ...>
+    const atRiskList = document.getElementById('atRiskList');  // <ul id="atRiskList">
+    const atRiskMeta = document.getElementById('atRiskMeta');  // <span id="atRiskMeta">
+
+    // ===================== Model R² =====================
+    fetchJSON('/api/model_accuracy').then(d => {
+        if (!d) return;
+        r2El.textContent = (d.r_squared * 100).toFixed(2) + '%';
+    });
+
+    // ===================== Mentor dashboards / At-Risk =====================
+    if (role === 'admin') {
+        // Mentor dashboards (admin sees ALL mentors, with buttons)
+        mentorBox.classList.remove('hidden');
+        fetchJSON('/api/mentors').then(ms => {
+            if (!ms || !Array.isArray(ms)) return;
+            mentorLinks.innerHTML = ms
+                .map(m => `
+          <li class="flex items-center justify-between">
+            <div>
+              <a class="hover:underline text-sky-300" href="/mentor/${m.mentor_id}">
+                ${m.mentor_name}
+              </a>
+              <span class="text-slate-500">• ${m.department}</span>
+            </div>
+            <button onclick="window.location='/mentor/${m.mentor_id}'"
+              class="ml-3 bg-sky-600 hover:bg-sky-500 text-white text-xs px-3 py-1.5 rounded-lg">
+              See Detailed Analytics
+            </button>
+          </li>
+        `).join('');
+        }).catch(() => { /* ignore */ });
+
+        // At-Risk list (org-wide)
+        if (atRiskBox) {
+            const AT_RISK_THRESHOLD = 60;  // tweak if needed
+            const AT_RISK_LIMIT = 10;      // tweak if needed
+            atRiskBox.classList.remove('hidden');
+            fetchJSON(`/api/at_risk?threshold=${AT_RISK_THRESHOLD}&limit=${AT_RISK_LIMIT}`).then(d => {
+                if (!d || !Array.isArray(d.students)) return;
+                if (atRiskMeta) atRiskMeta.textContent = `threshold < ${d.threshold}`;
+                if (!d.students.length) {
+                    if (atRiskList) atRiskList.innerHTML = `<li class="text-slate-500">No students currently flagged.</li>`;
+                    return;
+                }
+                if (atRiskList) {
+                    atRiskList.innerHTML = d.students.map(s => `
+            <li class="flex items-center justify-between">
+              <span>${s.First_Name} ${s.Last_Name} <span class="text-slate-500">(${s.Department})</span></span>
+              <span class="text-slate-400">${Number(s.Predicted_Final_Score).toFixed(2)}</span>
+            </li>
+          `).join('');
+                }
+            }).catch(() => { /* ignore */ });
+        }
+    } else if (role === 'mentor') {
+        // Show a single self shortcut button for the mentor
+        const mentorId = claims.mentor_id; // set by backend claims
+        if (mentorId) {
+            mentorBox.classList.remove('hidden');
+            mentorLinks.innerHTML = `
+        <li>
+          <button onclick="window.location='/mentor/${mentorId}'"
+            class="bg-sky-600 hover:bg-sky-500 text-white text-xs px-3 py-1.5 rounded-lg">
+            See My Detailed Analytics
+          </button>
+        </li>
+      `;
+        } else {
+            mentorBox.classList.add('hidden');
+        }
+        // Mentors should not see org-wide at-risk list
+        atRiskBox?.classList.add('hidden');
+    } else {
+        // Students see neither mentors list nor at-risk card
+        mentorBox?.classList.add('hidden');
+        atRiskBox?.classList.add('hidden');
+    }
+
+    // ===================== Students visible to viewer =====================
+    let students = [];
+    fetchJSON('/api/students').then(rows => {
+        if (!rows) return;
+        students = rows;
+        renderList(rows);
+        studentHint.textContent = rows.length ? '' : 'No students visible for your role.';
+    });
+
+    function renderList(rows) {
+        listEl.innerHTML = rows.map(r => {
+            const name = `${r.First_Name} ${r.Last_Name}`;
+            return `<li class="py-2 px-2 cursor-pointer hover:bg-slate-800/70" data-id="${r.Student_ID}">
+                <div class="flex items-center justify-between gap-3">
+                  <span>${name}</span>
+                  <span class="text-slate-500 text-xs">${r.Student_ID}</span>
+                </div>
+              </li>`;
+        }).join('');
+    }
+
+    searchEl.addEventListener('input', () => {
+        const q = searchEl.value.toLowerCase().trim();
+        renderList(students.filter(s => `${s.First_Name} ${s.Last_Name} ${s.Student_ID}`.toLowerCase().includes(q)));
+    });
+
+    listEl.addEventListener('click', (e) => {
+        const li = e.target.closest('li[data-id]');
+        if (!li) return;
+        loadStudent(li.dataset.id);
+    });
+
+    // ===================== Radar chart =====================
+    let radarChart;
+    function drawRadar(student, avg) {
+        const ctx = document.getElementById('radar');
+
+        // Build gradient fill
+        const g = ctx.getContext('2d').createLinearGradient(0, 0, 0, 300);
+        g.addColorStop(0, 'rgba(56, 189, 248, 0.35)');  // sky-400
+        g.addColorStop(1, 'rgba(56, 189, 248, 0.10)');
+
+        const labels = ['Midterm', 'Assignments', 'Quizzes', 'Projects', 'Participation'];
+        const sVals = [student.midterm, student.assignments, student.quizzes, student.projects, student.participation];
+        const aVals = [avg.midterm, avg.assignments, avg.quizzes, avg.projects, avg.participation];
+
+        if (radarChart) radarChart.destroy();
+        radarChart = new Chart(ctx, {
+            type: 'radar',
+            data: {
+                labels,
+                datasets: [
+                    {
+                        label: 'Student',
+                        data: sVals,
+                        borderWidth: 2,
+                        borderColor: 'rgba(56, 189, 248, 0.9)',
+                        backgroundColor: g,
+                        pointRadius: 3,
+                        pointHoverRadius: 5,
+                        pointBackgroundColor: 'rgba(56, 189, 248, 1)'
+                    },
+                    {
+                        label: 'Dept Avg',
+                        data: aVals,
+                        borderWidth: 2,
+                        borderColor: 'rgba(148, 163, 184, 0.9)', // slate-400
+                        backgroundColor: 'rgba(148, 163, 184, 0.10)',
+                        pointRadius: 0,
+                        borderDash: [6, 4]
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    legend: { labels: { color: '#cbd5e1' } },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.r.toFixed(2)}`
+                        }
+                    }
+                },
+                scales: {
+                    r: {
+                        grid: { color: 'rgba(148,163,184,0.2)' },
+                        angleLines: { color: 'rgba(148,163,184,0.2)' },
+                        pointLabels: { color: '#94a3b8' },
+                        suggestedMin: 0,
+                        suggestedMax: 100,
+                        ticks: { showLabelBackdrop: false, color: '#94a3b8', stepSize: 10 }
+                    }
+                }
+            }
+        });
+    }
+
+    function renderImprovements(d) {
+        document.getElementById('contextDept').textContent = `vs ${d.department} average`;
+        const container = document.getElementById('improveList');
+
+        // Order by weakest areas first (most negative delta)
+        const pairs = Object.entries(d.deltas).sort((a, b) => a[1] - b[1]);
+
+        container.innerHTML = pairs.map(([key, delta]) => {
+            const pretty = key.charAt(0).toUpperCase() + key.slice(1);
+            const good = delta >= 0;
+            const tone = good ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' : 'text-rose-400 bg-rose-500/10 border-rose-500/20';
+            const msg = d.suggestions.find(s => s.toLowerCase().startsWith(pretty.toLowerCase()));
+            return `
+        <div class="border ${tone} rounded-xl p-3">
+          <div class="flex items-center justify-between">
+            <span class="font-medium">${pretty}</span>
+            <span class="${good ? 'text-emerald-400' : 'text-rose-400'} text-sm">${delta > 0 ? '+' : ''}${delta}</span>
+          </div>
+          <p class="text-slate-300 text-sm mt-1">${msg}</p>
+        </div>`;
+        }).join('');
+    }
+
+    async function loadStudent(id) {
+        const d = await fetchJSON(`/api/student_data/${id}`);
+        if (!d || d.error) { alert(d?.error || 'Unable to load student'); return; }
+
+        // Header
+        document.getElementById('studentName').textContent = d.full_name;
+        document.getElementById('studentMeta').textContent = `${d.student_id} • ${d.department}`;
+        document.getElementById('predScore').textContent = d.predicted_final_score;
+        document.getElementById('actualScore').textContent = d.actual_final_score;
+
+        // Graph + Improvements
+        drawRadar(d.graph_data, d.dept_avg);
+        renderImprovements(d);
+
+        const btn = document.getElementById('downloadReport');
+        if (btn) {
+            btn.onclick = () => downloadFile(`/report/${d.student_id}.pdf`, `${d.student_id}_report.pdf`);
+        }
+
+    }
+
+    
+
+    async function downloadFile(url, filename) {
+            const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+            if (!r.ok) { alert('Download failed'); return; }
+            const blob = await r.blob();
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(link.href);
+        }
+</script>
+</body>
+</html>
